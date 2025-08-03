@@ -1,5 +1,5 @@
 // server.js - A Node.js and Express server that handles both HTTP requests
-// and WebSocket connections for a multi-world game.
+// and WebSocket connections for a multi-world game, with a defined API.
 
 const express = require("express");
 const http = require("http");
@@ -18,129 +18,180 @@ const server = http.createServer(app);
 const worldWebSocketServers = new Map();
 
 // --- Game World Configuration ---
-// This array defines our game worlds. The `full` property will be
-// dynamically updated based on the number of connections.
 const worlds = [
   {
     name: "Fireplane",
     path: "/worlds/fireplane",
     icon: "fire",
     full: 0,
+    players: {}, // We'll store player data here
   },
   {
     name: "Waterscape",
     path: "/worlds/waterscape",
     icon: "water",
     full: 0,
+    players: {}, // We'll store player data here
   },
 ];
 
 // --- Dedicated WebSocket Server for the World List ---
-// This WebSocket server handles clients that are just looking at the
-// list of available worlds. We use `noServer: true` because it will
-// be attached to our main HTTP server's 'upgrade' event listener.
 const worldListWss = new WebSocket.Server({ noServer: true });
 
 worldListWss.on("connection", (ws) => {
   console.log(`🌐 Client connected to world list.`);
-  // Immediately send the current list of worlds to the new client.
   ws.send(JSON.stringify({ type: "worlds", servers: worlds }));
 
-  // This WebSocket is for the world list, so it doesn't need to handle
-  // complex in-game messages. It will listen for simple messages if needed.
   ws.on("message", (msg) => {
     console.log("📩 Message received on world list connection:", msg.toString());
   });
 
-  // When a client for the world list disconnects, we log it.
   ws.on("close", () => {
     console.log("❌ Client disconnected from world list.");
   });
 });
 
 // --- WebSocket Servers for Each Individual Game World ---
-// We loop through our defined worlds and create a WebSocket server for each.
 worlds.forEach((world) => {
   const wss = new WebSocket.Server({ noServer: true });
   worldWebSocketServers.set(world.path, wss);
 
-  wss.on("connection", (ws) => {
-    // --- Increment player count on new connection ---
+  wss.on("connection", (ws, req) => {
+    // Generate a unique ID for the new player.
+    const playerId = `player_${Math.random().toString(36).substr(2, 9)}`;
+    const player = {
+      id: playerId,
+      name: `Guest_${Math.floor(Math.random() * 1000)}`,
+      x: Math.random() * 800,
+      y: Math.random() * 600,
+    };
+    world.players[playerId] = player;
     world.full++;
-    console.log(`🎮 Player connected to ${world.name}. Current players: ${world.full}`);
 
-    // Broadcast the updated world list to all clients of the world list server.
+    console.log(`🎮 Player '${player.name}' (${playerId}) connected to ${world.name}. Current players: ${world.full}`);
+
+    // Immediately send the new player their ID and the current state of the world.
+    ws.send(JSON.stringify({ type: "init", player, players: world.players }));
+
+    // Broadcast a "playerJoined" event to all other clients in this world.
+    wss.clients.forEach(client => {
+      if (client !== ws && client.readyState === WebSocket.OPEN) {
+        client.send(JSON.stringify({ type: "playerJoined", player }));
+      }
+    });
+
+    // Update the world list for clients on the main page.
     broadcastWorldListUpdate();
 
-    // Handle messages from the client specific to this game world.
+    // The main API for in-game interactions.
     ws.on("message", (msg) => {
       try {
         const data = JSON.parse(msg);
-        if (data.type === "login" && data.userId) {
-          console.log(`✅ User logged in to ${world.name}: ${data.userId}`);
+        switch (data.type) {
+          case "chatMessage":
+            // API: Client sends a chat message.
+            // Server broadcasts it to all players in the world.
+            if (data.message) {
+              const chatBroadcast = {
+                type: "chatMessage",
+                sender: player.name,
+                message: data.message,
+              };
+              wss.clients.forEach(client => {
+                if (client.readyState === WebSocket.OPEN) {
+                  client.send(JSON.stringify(chatBroadcast));
+                }
+              });
+            }
+            break;
+          case "movePlayer":
+            // API: Client sends new position data.
+            // Server updates the player's position and broadcasts it.
+            if (data.x !== undefined && data.y !== undefined) {
+              world.players[playerId].x = data.x;
+              world.players[playerId].y = data.y;
+
+              const moveBroadcast = {
+                type: "playerMoved",
+                id: playerId,
+                x: data.x,
+                y: data.y,
+              };
+              wss.clients.forEach(client => {
+                // Broadcast to all clients including the sender to ensure state consistency.
+                if (client.readyState === WebSocket.OPEN) {
+                  client.send(JSON.stringify(moveBroadcast));
+                }
+              });
+            }
+            break;
+          default:
+            console.log(`📩 Unhandled message type from '${player.name}':`, data.type);
         }
       } catch (e) {
-        console.error(`🚨 Invalid message received in ${world.name} world:`, e);
+        console.error(`🚨 Invalid JSON received in ${world.name} world from '${player.name}':`, e);
       }
     });
 
     // --- Decrement player count on disconnection ---
     ws.on("close", () => {
+      delete world.players[playerId];
       world.full--;
-      console.log(`❌ Player disconnected from ${world.name}. Current players: ${world.full}`);
-      // Broadcast the updated world list again to reflect the player count change.
+      console.log(`❌ Player '${player.name}' (${playerId}) disconnected from ${world.name}. Current players: ${world.full}`);
+
+      // Broadcast a "playerLeft" event to all other clients in this world.
+      wss.clients.forEach(client => {
+        if (client.readyState === WebSocket.OPEN) {
+          client.send(JSON.stringify({ type: "playerLeft", id: playerId }));
+        }
+      });
+
+      // Update the world list for clients on the main page.
       broadcastWorldListUpdate();
     });
   });
 });
 
-// A helper function to broadcast the current list of worlds to all
-// clients connected to the world list WebSocket server.
 function broadcastWorldListUpdate() {
+  const updatedWorlds = worlds.map(w => ({
+    name: w.name,
+    path: w.path,
+    icon: w.icon,
+    full: w.full
+  }));
   worldListWss.clients.forEach((client) => {
     if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: "worlds", servers: worlds }));
+      client.send(JSON.stringify({ type: "worlds", servers: updatedWorlds }));
     }
   });
 }
 
 // --- Express.js HTTP Server Setup ---
-// Serve static files from a 'public' folder.
 app.use(express.static(path.join(__dirname, "public")));
 
-// Serve `index.html` for the root URL.
 app.get("/", (req, res) => {
   res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
 // --- WebSocket Upgrade Logic ---
-// This is the crucial part that links the HTTP server to our
-// WebSocket servers. It listens for a client trying to 'upgrade'
-// an HTTP connection to a WebSocket connection.
 server.on("upgrade", (req, socket, head) => {
-  // Check if the requested URL is for the world list.
   if (req.url === "/game-api/worlds") {
-    // If it is, handle the upgrade with the world list WebSocket server.
     worldListWss.handleUpgrade(req, socket, head, (ws) => {
       worldListWss.emit("connection", ws, req);
     });
   } else {
-    // If not the world list, check if the URL matches a game world path.
     const wssInstance = worldWebSocketServers.get(req.url);
     if (wssInstance) {
-      // If a match is found, handle the upgrade with that world's WebSocket server.
       wssInstance.handleUpgrade(req, socket, head, (ws) => {
         wssInstance.emit("connection", ws, req);
       });
     } else {
-      // If no match, reject the upgrade request with a 404 error.
       socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
       socket.destroy();
     }
   }
 });
 
-// Start the HTTP server and have it listen on the specified port.
 server.listen(PORT, () => {
   console.log(`✅ Server is listening on port ${PORT}`);
 });
