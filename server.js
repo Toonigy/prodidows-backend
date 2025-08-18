@@ -1,197 +1,121 @@
-// server.js - A Node.js and Express server that handles both HTTP requests
-// and WebSocket connections for a multi-world game, with a defined API.
-
 const express = require("express");
 const http = require("http");
-const WebSocket = require("ws");
+const cors = require("cors"); // Re-add cors for Socket.IO setup
 const path = require("path");
+const World = require("./World"); // Import the World class.
+const WorldSystem = require("./WorldSystem"); // Import WorldSystem
 
 const app = express();
-// Use the PORT environment variable provided by platforms like Render, or default to 10000.
 const PORT = process.env.PORT || 10000;
-
-// Create a standard HTTP server. This server will handle the initial
-// HTTP requests and also listen for 'upgrade' events for WebSockets.
 const server = http.createServer(app);
 
-// A map to hold different WebSocket server instances, one for each world.
-const worldWebSocketServers = new Map();
-
-// --- Game World Configuration ---
-const worlds = [
-  {
-    name: "Fireplane",
-    path: "/worlds/fireplane",
-    icon: "fire",
-    full: 0,
-    players: {}, // We'll store player data here
-  },
-  {
-    name: "Waterscape",
-    path: "/worlds/waterscape",
-    icon: "water",
-    full: 0,
-    players: {}, // We'll store player data here
-  },
-];
-
-// --- Dedicated WebSocket Server for the World List ---
-const worldListWss = new WebSocket.Server({ noServer: true });
-
-worldListWss.on("connection", (ws) => {
-  console.log(`🌐 Client connected to world list.`);
-  ws.send(JSON.stringify({ type: "worlds", servers: worlds }));
-
-  ws.on("message", (msg) => {
-    console.log("📩 Message received on world list connection:", msg.toString());
-  });
-
-  ws.on("close", () => {
-    console.log("❌ Client disconnected from world list.");
-  });
-});
-
-// --- WebSocket Servers for Each Individual Game World ---
-worlds.forEach((world) => {
-  const wss = new WebSocket.Server({ noServer: true });
-  worldWebSocketServers.set(world.path, wss);
-
-  wss.on("connection", (ws, req) => {
-    // Generate a unique ID for the new player.
-    const playerId = `player_${Math.random().toString(36).substr(2, 9)}`;
-    const player = {
-      id: playerId,
-      name: `Guest_${Math.floor(Math.random() * 1000)}`,
-      x: Math.random() * 800,
-      y: Math.random() * 600,
-    };
-    world.players[playerId] = player;
-    world.full++;
-
-    console.log(`🎮 Player '${player.name}' (${playerId}) connected to ${world.name}. Current players: ${world.full}`);
-
-    // Immediately send the new player their ID and the current state of the world.
-    ws.send(JSON.stringify({ type: "init", player, players: world.players }));
-
-    // Broadcast a "playerJoined" event to all other clients in this world.
-    wss.clients.forEach(client => {
-      if (client !== ws && client.readyState === WebSocket.OPEN) {
-        client.send(JSON.stringify({ type: "playerJoined", player }));
-      }
-    });
-
-    // Update the world list for clients on the main page.
-    broadcastWorldListUpdate();
-
-    // The main API for in-game interactions.
-    ws.on("message", (msg) => {
-      try {
-        const data = JSON.parse(msg);
-        switch (data.type) {
-          case "chatMessage":
-            // API: Client sends a chat message.
-            // Server broadcasts it to all players in the world.
-            if (data.message) {
-              const chatBroadcast = {
-                type: "chatMessage",
-                sender: player.name,
-                message: data.message,
-              };
-              wss.clients.forEach(client => {
-                if (client.readyState === WebSocket.OPEN) {
-                  client.send(JSON.stringify(chatBroadcast));
-                }
-              });
-            }
-            break;
-          case "movePlayer":
-            // API: Client sends new position data.
-            // Server updates the player's position and broadcasts it.
-            if (data.x !== undefined && data.y !== undefined) {
-              world.players[playerId].x = data.x;
-              world.players[playerId].y = data.y;
-
-              const moveBroadcast = {
-                type: "playerMoved",
-                id: playerId,
-                x: data.x,
-                y: data.y,
-              };
-              wss.clients.forEach(client => {
-                // Broadcast to all clients including the sender to ensure state consistency.
-                if (client.readyState === WebSocket.OPEN) {
-                  client.send(JSON.stringify(moveBroadcast));
-                }
-              });
-            }
-            break;
-          default:
-            console.log(`📩 Unhandled message type from '${player.name}':`, data.type);
-        }
-      } catch (e) {
-        console.error(`🚨 Invalid JSON received in ${world.name} world from '${player.name}':`, e);
-      }
-    });
-
-    // --- Decrement player count on disconnection ---
-    ws.on("close", () => {
-      delete world.players[playerId];
-      world.full--;
-      console.log(`❌ Player '${player.name}' (${playerId}) disconnected from ${world.name}. Current players: ${world.full}`);
-
-      // Broadcast a "playerLeft" event to all other clients in this world.
-      wss.clients.forEach(client => {
-        if (client.readyState === WebSocket.OPEN) {
-          client.send(JSON.stringify({ type: "playerLeft", id: playerId }));
-        }
-      });
-
-      // Update the world list for clients on the main page.
-      broadcastWorldListUpdate();
-    });
-  });
-});
-
-function broadcastWorldListUpdate() {
-  const updatedWorlds = worlds.map(w => ({
-    name: w.name,
-    path: w.path,
-    icon: w.icon,
-    full: w.full
-  }));
-  worldListWss.clients.forEach((client) => {
-    if (client.readyState === WebSocket.OPEN) {
-      client.send(JSON.stringify({ type: "worlds", servers: updatedWorlds }));
-    }
-  });
-}
-
-// --- Express.js HTTP Server Setup ---
+app.use(cors()); // Use cors middleware
 app.use(express.static(path.join(__dirname, "public")));
+app.use(express.json()); // Middleware to parse JSON request bodies
 
 app.get("/", (req, res) => {
-  res.sendFile(path.join(__dirname, "public", "index.html"));
+    res.sendFile(path.join(__dirname, "public", "index.html"));
 });
 
-// --- WebSocket Upgrade Logic ---
-server.on("upgrade", (req, socket, head) => {
-  if (req.url === "/game-api/worlds") {
-    worldListWss.handleUpgrade(req, socket, head, (ws) => {
-      worldListWss.emit("connection", ws, req);
-    });
-  } else {
-    const wssInstance = worldWebSocketServers.get(req.url);
-    if (wssInstance) {
-      wssInstance.handleUpgrade(req, socket, head, (ws) => {
-        wssInstance.emit("connection", ws, req);
-      });
-    } else {
-      socket.write("HTTP/1.1 404 Not Found\r\n\r\n");
-      socket.destroy();
+// ⭐ Socket.IO Server Setup ⭐
+// Re-adding Socket.IO setup as your WorldSystem and client expect it.
+const { Server } = require("socket.io"); 
+const io = new Server(server, {
+    cors: {
+        origin: "*", // Allow all origins for development. Restrict in production.
+        methods: ["GET", "POST"]
     }
-  }
+});
+console.warn("Socket.IO server setup complete. Using HTTP for now.");
+
+
+// --- HTTP Endpoints for API Calls ---
+
+// ⭐ FIX: Re-adding HTTP GET endpoint for World List at /v2/worlds ⭐
+// This endpoint directly serves the world list, addressing the client's hardcoded request.
+app.get("/v2/worlds", (req, res) => {
+    console.log(`\n--- World List GET Request (via /v2/worlds) ---`);
+    console.log(`Received GET request for /v2/worlds from IP: ${req.ip}`);
+
+    // Get the simplified list of all worlds
+    const simplifiedWorlds = World.allWorlds.map(world => world.toSimplifiedObject());
+
+    // Send the simplified world list as a JSON response
+    res.status(200).json(simplifiedWorlds);
+    console.log(`Responded to /v2/worlds GET with ${simplifiedWorlds.length} worlds.`);
 });
 
+
+// ⭐ Re-added: HTTP GET endpoint for World List (kept for backward compatibility if needed) ⭐
+app.get("/game-api/v1/world-list", (req, res) => {
+    console.log(`\n--- World List GET Request (via /game-api/v1/world-list) ---`);
+    console.log(`Received GET request for /game-api/v1/world-list from IP: ${req.ip}`);
+
+    // Get the simplified list of all worlds
+    const simplifiedWorlds = World.allWorlds.map(world => world.toSimplifiedObject());
+
+    // Send the simplified world list as a JSON response
+    res.status(200).json(simplifiedWorlds);
+    console.log(`Responded to world list GET with ${simplifiedWorlds.length} worlds.`);
+});
+
+// ⭐ Re-added: HTTP POST for game events (e.g., /game-api/v1/log-event) ⭐
+app.post("/game-api/v1/log-event", (req, res) => {
+    console.log(`\n--- Game Event POST Request ---`);
+    console.log(`Received POST request for /game-api/v1/log-event from IP: ${req.ip}`);
+    console.log(`Request Body (Game Event Data):`, JSON.stringify(req.body, null, 2));
+    res.status(200).json({ status: "received", message: "Game event logged." });
+    console.log(`Responded to game event POST.`);
+});
+
+// ⭐ Re-added: HTTP POST for matchmaking (e.g., startMatchmaking) ⭐
+app.post("/game-api/v1/matchmaking-api/begin", (req, res) => {
+    console.log(`\n--- Matchmaking POST Request ---`);
+    console.log(`Received POST request for /game-api/v1/matchmaking-api/begin from IP: ${req.ip}`);
+    console.log(`Matchmaking Data:`, JSON.stringify(req.body, null, 2));
+
+    // Simulate matchmaking logic here (e.g., find a match, or put player in a queue)
+    // For now, just send a success response.
+    res.status(200).json({ status: "success", message: "Matchmaking request received." });
+    console.log(`Responded to matchmaking POST.`);
+});
+
+
+// --- Socket.IO Connection Handling ---
+// A map to store WorldSystem instances, keyed by world path
+const worldSystems = {};
+
+// Initialize a WorldSystem for each world defined in World.allWorlds
+World.allWorlds.forEach(world => {
+    const system = new WorldSystem(world);
+    worldSystems[world.path] = system; // Store by path for easy lookup
+});
+
+io.on("connection", (socket) => {
+    const requestPath = socket.handshake.url; // Get the path the client connected to
+    const worldSystem = worldSystems[requestPath];
+
+    if (worldSystem) {
+        // Delegate the connection handling to the appropriate WorldSystem
+        worldSystem.handleConnection(socket);
+    } else {
+        console.warn(`\n--- Socket.IO Warning ---`);
+        console.warn(`No WorldSystem found for path: ${requestPath}. Disconnecting socket.`);
+        socket.disconnect(true); // Disconnect if no matching world system
+        console.log(`-------------------------\n`);
+    }
+});
+
+
+// --- Server Startup ---
 server.listen(PORT, () => {
-  console.log(`✅ Server is listening on port ${PORT}`);
+    console.log(`\n--- Server Startup ---`);
+    console.log(`✅ Server is listening on port ${PORT}...`);
+    console.log(`🌐 HTTP endpoints for world list, status, game events, and matchmaking are online.`);
+    console.log(`🚀 Socket.IO server is online and ready for game world connections.`);
+    console.log(`Defined worlds:`);
+    World.allWorlds.forEach(world => {
+        console.log(`  - ID: ${world.id}, Name: "${world.name}", Path: "${world.path}"`);
+    });
+    console.log(`-----------------------\n`);
 });
