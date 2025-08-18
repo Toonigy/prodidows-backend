@@ -1,25 +1,13 @@
 {
-  "name": "prodigy-definitive-edition-server",
+  "name": "your-project",
   "version": "1.0.0",
-  "description": "Backend server for Prodigy Definitive Edition game.",
   "main": "server.js",
   "scripts": {
-    "start": "node server.js",
-    "dev": "node server.js"
+    "start": "node server.js"
   },
-  "engines": {
-    "node": ">=18.x"
-  },
-  "keywords": [
-    "prodigy",
-    "game",
-    "server",
-    "websocket"
-  ],
-  "author": "Your Name",
-  "license": "ISC",
   "dependencies": {
-    "express": "^4.19.2",
-    "ws": "^8.18.0"
+    "express": "^4.21.2",
+    "socket.io": "^4.5.4",
+    "ws": "^8.13.0"
   }
 }
