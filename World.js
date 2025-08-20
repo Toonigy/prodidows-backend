@@ -1,6 +1,6 @@
 // World.js
 // This file defines the various game worlds and their properties.
-const WebSocket = require("ws"); // Ensure WebSocket is imported if this is a standalone file for ws.WebSocket.Server
+const WebSocket = require("ws"); // ⭐ NEW: Import the ws library ⭐
 
 class World {
     constructor(id, name, path, meta = {}) {
@@ -8,143 +8,166 @@ class World {
         this.name = name;
         this.path = path;
         this.meta = meta; // Additional metadata like element type, etc.
-        this.currentPlayers = 0; // Simulate player count for display
+        this.currentPlayers = 0; // Track actual connected players for this world
         this.maxPlayers = 100; // Max players for this world
-        // Store connected sockets for this world to manage player lists and broadcasting
-        // Map: socket.id -> { socket, userID, wizardData, currentZone }
-        this.connectedSockets = new Map(); 
-        console.log(`🚀 World: Initialized "${this.name}" (ID: ${this.id}, Path: ${this.path})`);
 
-        // Create a new raw WebSocket server for this specific world path
-        // This 'noServer: true' means it hooks into an existing HTTP/HTTPS server's 'upgrade' event
+        // ⭐ NEW: Initialize a raw WebSocket.Server instance for this world ⭐
+        // 'noServer: true' means it won't listen on its own port, but will be handled
+        // by the main HTTP/HTTPS server's 'upgrade' event (in server.js).
         this.wss = new WebSocket.Server({ noServer: true });
+        this.connectedClients = new Map(); // Map: ws -> { userID, wizardData, currentZone }
 
-        // Handle incoming connections for this world
-        this.wss.on("connection", (ws, req) => { // 'req' object is now passed from server.js 'upgrade' event
+        console.log(`🚀 World: Initialized "${this.name}" (ID: ${this.id}, Path: ${this.path}) with WSS instance.`);
+
+        // --- Raw WebSocket Event Handlers for THIS WORLD ---
+        // These handlers are specific to the WebSocket connections managed by this World's wss instance.
+        this.wss.on("connection", (ws, req) => {
+            // Parse query parameters from the upgrade request URL
+            const parsedUrl = new URL(req.url, `http://${req.headers.host}`);
+            const userId = parsedUrl.searchParams.get('userId');
+            const userToken = parsedUrl.searchParams.get('userToken');
+            const zone = parsedUrl.searchParams.get('zone') || 'unknown';
+            const worldIdFromClient = parsedUrl.searchParams.get('worldId');
+            const worldNameFromClient = decodeURIComponent(parsedUrl.searchParams.get('worldName') || 'Unknown World');
+
+            if (!userId || !worldIdFromClient) {
+                console.error(`World "${this.name}": Missing userId or worldId in WebSocket handshake. Closing connection.`);
+                ws.close(1008, "Missing userId or worldId"); // Close with specific code
+                return;
+            }
+
+            if (this.currentPlayers >= this.maxPlayers) {
+                console.warn(`World "${this.name}" is full. Rejecting user ${userId}.`);
+                ws.send(JSON.stringify({ type: "worldFull", message: "World is full." }));
+                ws.close(1013, "World full"); // Service Unavailable
+                return;
+            }
+            
             this.currentPlayers++;
-            console.log(`🌐 Player connected to ${this.name}. Current players: ${this.currentPlayers}`);
+            this.connectedClients.set(ws, { userId, userToken, currentZone: zone, wizardData: null });
+            console.log(`🌐 Raw WS: User ${userId} connected to "${this.name}". Current players: ${this.currentPlayers}`);
 
-            const urlParams = new URLSearchParams(req.url.split('?')[1]); // Parse query params from original request URL
-            const userID = urlParams.get('userId');
-            const userToken = urlParams.get('userToken');
-            const initialZone = urlParams.get('zone'); // Get the initial zone from the URL
+            // Send initial confirmation to the client
+            ws.send(JSON.stringify({
+                type: "worldJoinedConfirmed",
+                worldId: this.id,
+                zoneId: zone,
+                worldName: this.name,
+                message: `Welcome to ${this.name}, ${userId}!`
+            }));
+            console.log(`✅ Raw WS: Sent 'worldJoinedConfirmed' to ${userId}.`);
 
-            // Store connection details (including query params)
-            ws.connectionData = { userID, userToken, initialZone };
-            this.connectedSockets.set(ws.id, {
-                socket: ws,
-                userID: userID,
-                userToken: userToken,
-                currentZone: initialZone // Store the zone for this player
-            });
-
-            // Notify all clients in this world about the player count update (simplified)
-            this.broadcastWorldsUpdate();
-
-            // Handle messages from the client.
-            ws.on("message", (msg) => {
+            // ⭐ Handle incoming 'message' events from this specific raw WebSocket client ⭐
+            ws.on("message", message => {
                 try {
-                    const data = JSON.parse(msg);
-                    console.log(`➡️ Received message in ${this.name} world from ${userID}:`, data.type);
+                    const data = JSON.parse(message); // Raw WS messages are usually strings and need parsing
+                    console.log(`➡️ Raw WS Message from ${userId} in "${this.name}":`, data.type);
 
-                    // ⭐ NEW: Handle the 'joinGameWorld' message from the client ⭐
-                    if (data.type === "joinGameWorld" && data.userID && data.zone) {
-                        console.log(`✅ User ${data.userID} is joining zone: ${data.zone} in ${this.name}.`);
-                        // Update the player's current zone in the map
-                        const playerEntry = this.connectedSockets.get(ws.id);
-                        if (playerEntry) {
-                            playerEntry.currentZone = data.zone;
+                    if (data.type === "joinMultiplayerServer") {
+                        // This message is sent by the client after initial connection to fully 'join'
+                        const clientData = this.connectedClients.get(ws);
+                        if (clientData) {
+                            clientData.wizardData = data.wizardData;
+                            clientData.currentZone = data.zone;
+                            this.connectedClients.set(ws, clientData); // Update stored data
+
+                            // Broadcast 'playerJoined' to *other* players in this world
+                            this.broadcast(ws, "playerJoined", {
+                                userID: userId,
+                                username: clientData.wizardData?.appearance?.name || "Player", // Use wizardData for username
+                                wizardData: clientData.wizardData,
+                                zone: clientData.currentZone,
+                                worldId: this.id,
+                                worldName: this.name
+                            });
+                            console.log(`📢 Raw WS: Broadcasted 'playerJoined' for ${userId}.`);
+
+                            // Send the current player list to the newly joined player
+                            ws.send(JSON.stringify({
+                                type: "playerList",
+                                players: Array.from(this.connectedClients.values()).map(p => ({
+                                    userID: p.userId,
+                                    zone: p.currentZone,
+                                    worldId: this.id,
+                                    worldName: this.name,
+                                    wizardData: p.wizardData
+                                }))
+                            }));
+                            console.log(`Raw WS: Sent initial playerList to ${userId}.`);
                         }
-
-                        // ⭐ CRITICAL FIX: Send confirmation back to the client that just joined ⭐
-                        ws.send(JSON.stringify({
-                            type: "worldJoinedConfirmed",
-                            zoneId: data.zone, // Confirm the zone they joined
-                            message: "Successfully joined world and zone."
-                        }));
-                        console.log(`↩️ Sent 'worldJoinedConfirmed' to ${data.userID} for zone ${data.zone}.`);
-
-                        // Broadcast a message to all other clients about the new player.
-                        // Filter out the sender so they don't get their own join message broadcast.
-                        this.wss.clients.forEach(client => {
-                            if (client !== ws && client.readyState === WebSocket.OPEN) {
-                                client.send(JSON.stringify({ 
-                                    type: "playerJoined", 
-                                    userID: data.userID,
-                                    username: data.username || "Player", // Include username if available
-                                    zone: data.zone // Indicate which zone they joined
-                                }));
-                            }
-                        });
-                        console.log(`📢 Broadcasted 'playerJoined' for ${data.userID}.`);
-
-                    } else if (data.type === "chatMessage" && data.message) {
-                        // Example: Broadcast chat messages to all clients in this world
-                        this.wss.clients.forEach(client => {
-                            if (client.readyState === WebSocket.OPEN) {
-                                client.send(JSON.stringify({
-                                    type: "chatMessage",
-                                    userID: userID, // Or data.userID if sent in message
-                                    message: data.message
-                                }));
-                            }
-                        });
-                        console.log(`💬 Broadcasted chat from ${userID}: ${data.message}`);
+                    } else if (data.type === "chatMessage") {
+                        this.broadcast(ws, "chatMessage", { userID: userId, message: data.message });
+                    } else if (data.type === "switchZone") {
+                        const clientData = this.connectedClients.get(ws);
+                        if (clientData) {
+                            clientData.currentZone = data.zoneName;
+                            this.connectedClients.set(ws, clientData);
+                            console.log(`User ${userId} switched to zone: ${data.zoneName} in world "${this.name}".`);
+                            this.broadcast(ws, "playerMoved", {
+                                userID: userId,
+                                newZone: data.zoneName,
+                                worldId: this.id,
+                                worldName: this.name
+                            });
+                        }
                     }
                     // Add more game-specific message handling logic as needed
                 } catch (e) {
-                    console.error(`❌ Invalid message received in ${this.name} world from ${userID}:`, e);
+                    console.error(`❌ Raw WS: Error parsing message from ${userId} in "${this.name}":`, e);
                 }
             });
 
-            // Handle client disconnection.
             ws.on("close", (code, reason) => {
                 this.currentPlayers--;
-                const disconnectedUserID = ws.connectionData?.userID || 'Unknown';
-                this.connectedSockets.delete(ws.id); // Remove from tracking map
-                console.log(`❌ Player ${disconnectedUserID} disconnected from ${this.name}. Current players: ${this.currentPlayers}`);
-                this.broadcastWorldsUpdate(); // Update player counts
-
-                // Broadcast player left message to remaining clients
-                this.wss.clients.forEach(client => {
-                    if (client.readyState === WebSocket.OPEN) {
-                        client.send(JSON.stringify({
-                            type: "playerLeft",
-                            userID: disconnectedUserID,
-                            reason: reason.toString() || "Disconnected"
-                        }));
-                    }
-                });
+                this.connectedClients.delete(ws);
+                console.log(`❌ Raw WS: User ${userId} disconnected from "${this.name}". Code: ${code}, Reason: ${reason}. Current players: ${this.currentPlayers}`);
+                this.broadcast(null, "playerLeft", { userID: userId, worldId: this.id, worldName: this.name, reason: reason.toString() });
             });
 
-            // Handle WebSocket errors
-            ws.on("error", (error) => {
-                console.error(`🔥 WebSocket error for ${userID} in ${this.name} world:`, error);
+            ws.on("error", error => {
+                console.error(`🔥 Raw WS: Error for user ${userId} in "${this.name}":`, error);
             });
         });
     }
 
-    // Helper method to send a message to all connected clients in this world.
-    broadcast(message) {
+    /**
+     * Sends a message to all connected clients in this world, optionally excluding a sender.
+     * This method uses the raw WebSocket 'send' method.
+     * @param {WebSocket|null} senderWs - The WebSocket of the client sending the message (to exclude from broadcast), or null to send to all.
+     * @param {string} eventType - The type of event to send (e.g., "playerJoined", "chatMessage").
+     * @param {Object} payload - The data payload for the event.
+     */
+    broadcast(senderWs, eventType, payload) {
+        const message = JSON.stringify({ type: eventType, ...payload });
         this.wss.clients.forEach(client => {
             if (client.readyState === WebSocket.OPEN) {
-                client.send(JSON.stringify(message));
+                if (senderWs === null || client !== senderWs) { // Send to all or exclude sender
+                    client.send(message);
+                }
             }
         });
     }
-    
-    // Sends a message to all clients with the updated world list.
-    // Note: This simplified update is primarily for player counts.
-    // A full world list update is typically handled by a central HTTP API.
-    broadcastWorldsUpdate() {
-        // In a more complex scenario, this would likely trigger an update
-        // to a central world list API or a dedicated "world status" channel.
-        // For now, it's just a placeholder for updating player counts if needed.
-        // This method is called from inside the World instance, so it only affects
-        // clients currently connected to *this* specific world.
-        // If a lobby needs to show real-time player counts across all worlds,
-        // a different mechanism (e.g., periodic polling or a separate Socket.IO connection
-        // for lobby updates) would be needed.
+
+    /**
+     * Returns a simplified object representation of the world,
+     * suitable for sending to the client in the world list.
+     * The client typically expects 'id', 'name', 'path', and 'full' (player count status).
+     */
+    toSimplifiedObject() {
+        // Calculate a simulated 'fullness' percentage for demonstration
+        const fullness = Math.floor((this.currentPlayers / this.maxPlayers) * 100);
+
+        // Create a shallow copy of the original meta object
+        const cleanedMeta = { ...this.meta };
+        delete cleanedMeta.description; // Remove description as per request
+
+        return {
+            id: this.id,
+            name: this.name,
+            path: this.path,
+            full: fullness, // Percentage of fullness (0-100)
+            meta: cleanedMeta // Cleaned meta object
+        };
     }
 }
 
