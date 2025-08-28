@@ -1,4 +1,4 @@
-// server.js
+<selection-tag>// server.js
 // This file is configured as a Node.js backend, optimized for deployment on platforms like Render,
 // and primarily focuses on providing WebSocket (both raw and Socket.IO) connectivity.
 
@@ -19,7 +19,9 @@ console.warn("Server is running in HTTP-only mode (optimized for Render deployme
 // ⭐ Configure CORS options for both HTTP and Socket.IO requests. ⭐
 // This allows your client (e.g., from localhost or other domains) to connect.
 const corsOptions = {
-    origin: '*', // Allow all origins for debugging. For production, specify your client's domain.
+    // ⭐ FIX: Explicitly allow http://localhost:10000 for local development. ⭐
+    // For production, you would typically replace '*' or add specific domains.
+    origin: ['http://localhost:10000', 'http://prodidows-backend.onrender.com'], // Allow localhost and your Render domain
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow common HTTP methods
     allowedHeaders: ['Content-Type', 'Authorization', 'auth-key', 'token'], // Explicitly allow necessary headers
     credentials: true // Allow cookies or authorization headers to be sent cross-origin
@@ -247,3 +249,4 @@ server.listen(PORT, () => {
     });
     console.log(`-------------------------\n`);
 });
+</selection-tag>```
