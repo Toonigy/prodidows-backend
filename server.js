@@ -1,4 +1,4 @@
-<selection-tag>// server.js
+// server.js
 // This file is configured as a Node.js backend, optimized for deployment on platforms like Render,
 // and primarily focuses on providing WebSocket (both raw and Socket.IO) connectivity.
 
@@ -16,12 +16,12 @@ const PORT = process.env.PORT || 10000; // Use environment variable for port, fa
 let server = http.createServer(app);
 console.warn("Server is running in HTTP-only mode (optimized for Render deployment).");
 
-// ⭐ Configure CORS options for both HTTP and Socket.IO requests. ⭐
+// Configure CORS options for both HTTP and Socket.IO requests.
 // This allows your client (e.g., from localhost or other domains) to connect.
 const corsOptions = {
-    // ⭐ FIX: Explicitly allow http://localhost:10000 for local development. ⭐
+    // Explicitly allow http://localhost:10000 for local development.
     // For production, you would typically replace '*' or add specific domains.
-    origin: ['http://localhost:10000', 'http://prodidows-backend.onrender.com', 'http://prodidows-servers.onrender.com'], // Allow localhost and your Render domain
+    origin: ['http://localhost:10000', 'http://prodidows-backend.onrender.com'], // Allow localhost and your Render domain
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow common HTTP methods
     allowedHeaders: ['Content-Type', 'Authorization', 'auth-key', 'token'], // Explicitly allow necessary headers
     credentials: true // Allow cookies or authorization headers to be sent cross-origin
@@ -36,7 +36,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // Middleware to parse JSON request bodies (for POST requests like game events)
 app.use(express.json());
 
-// --- ⭐ Core Game Worlds Definition ⭐ ---
+// --- Core Game Worlds Definition ---
 // Define the various game worlds and their initial properties directly within the server.
 const worlds = [
     { id: "world-fireplane-1", name: "Fireplane", path: "/worlds/fireplane", full: 0 },
@@ -45,7 +45,7 @@ const worlds = [
     { id: "world-town-1", name: "Town Square", path: "/worlds/town", full: 0 }
 ];
 
-// --- ⭐ HTTP Routes ⭐ ---
+// --- HTTP Routes ---
 // Route to serve your main index.html file
 app.get("/", (req, res) => {
     res.sendFile(path.join(__dirname, "public", "index.html"));
@@ -69,7 +69,7 @@ app.get("/game-api/v2/worlds", (req, res) => {
     console.log(`-----------------------------------------------------------\n`);
 });
 
-// --- ⭐ Raw WebSocket Server (for generic WebSocket clients/testers) ⭐ ---
+// --- Raw WebSocket Server (for generic WebSocket clients/testers) ---
 // This server handles raw WebSocket connections on the root path ('/').
 // It's created with `noServer: true` so it can be integrated with the existing HTTP server.
 const wss = new WebSocket.Server({ noServer: true });
@@ -102,7 +102,7 @@ wss.on('connection', ws => {
     });
 });
 
-// --- ⭐ Socket.IO Server (for game clients) ⭐ ---
+// --- Socket.IO Server (for game clients) ---
 // This initializes the Socket.IO server, attaching it to the HTTP server.
 const io = new Server(server, {
     cors: corsOptions, // Apply CORS options for Socket.IO
@@ -146,7 +146,7 @@ io.on("connection", (socket) => {
     });
 });
 
-// --- ⭐ Socket.IO Namespaces for Individual Game Worlds ⭐ ---
+// --- Socket.IO Namespaces for Individual Game Worlds ---
 // Create and configure a distinct Socket.IO namespace for each defined game world.
 worlds.forEach(world => {
     const namespace = io.of(world.path); // Define namespace based on world's path
@@ -220,7 +220,7 @@ worlds.forEach(world => {
     });
 });
 
-// ⭐ Handle the 'upgrade' event for both raw WebSockets and Socket.IO. ⭐
+// Handle the 'upgrade' event for both raw WebSockets and Socket.IO.
 // This is crucial for allowing the single HTTP server to manage both types of WebSocket connections.
 server.on('upgrade', (request, socket, head) => {
     const pathname = new URL(request.url, `http://${request.headers.host}`).pathname;
@@ -249,4 +249,3 @@ server.listen(PORT, () => {
     });
     console.log(`-------------------------\n`);
 });
-</selection-tag>```
