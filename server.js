@@ -21,7 +21,7 @@ console.warn("Server is running in HTTP-only mode (optimized for Render deployme
 const corsOptions = {
     // ⭐ FIX: Explicitly allow http://localhost:10000 for local development. ⭐
     // For production, you would typically replace '*' or add specific domains.
-    origin: ['http://localhost:10000', 'http://prodidows-backend.onrender.com'], // Allow localhost and your Render domain
+    origin: ['http://localhost:10000', 'http://prodidows-backend.onrender.com', 'http://prodidows-servers.onrender.com'], // Allow localhost and your Render domain
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'], // Explicitly allow common HTTP methods
     allowedHeaders: ['Content-Type', 'Authorization', 'auth-key', 'token'], // Explicitly allow necessary headers
     credentials: true // Allow cookies or authorization headers to be sent cross-origin
