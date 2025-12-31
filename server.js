@@ -1,14 +1,15 @@
 const express = require('express');
 const http = require('http');
-const path = require('path');
 const { Server } = require('socket.io');
 const cors = require('cors');
 
 const app = express();
 const server = http.createServer(app);
+
+// Initialize Socket.io with CORS for your frontend URL
 const io = new Server(server, {
     cors: {
-        origin: "*",
+        origin: "*", // Or your specific frontend URL like "https://your-game.onrender.com"
         methods: ["GET", "POST"]
     }
 });
@@ -16,12 +17,17 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// 1. STATIC FILE SERVING
-// Serves everything in the 'public' folder (index.html, game.min.js, etc.)
-const publicPath = path.join(__dirname, 'public');
-app.use(express.static(publicPath));
+// --- BACKEND STATUS ROUTE ---
+// This replaces the res.sendFile logic to prevent ENOENT errors
+app.get('/', (req, res) => {
+    res.json({
+        status: "online",
+        service: "Prodigy Definitive Edition Multiplayer Backend",
+        activePlayers: Object.keys(players).length
+    });
+});
 
-// 2. WORLD CONFIGURATION
+// --- WORLD DATA ---
 const worlds = [
     { id: 1, name: "Farflight", maxPopulation: 100, status: "online" },
     { id: 2, name: "Pirate Bay", maxPopulation: 100, status: "online" },
@@ -29,118 +35,92 @@ const worlds = [
     { id: 4, name: "Shiverchill", maxPopulation: 100, status: "online" }
 ];
 
-// Active sessions stored by socket ID
 const players = {}; 
 
-/**
- * Helper: Formats world data for the game's UI
- */
 function getWorldsWithPopulation() {
     return worlds.map(w => {
         const count = Object.values(players).filter(p => p.world === w.id).length;
         return { 
             ...w, 
             population: count,
-            full: count / w.maxPopulation // Required for game's 'getSuggested' logic
+            full: count / w.maxPopulation 
         };
     });
 }
 
-// 3. SOCKET.IO EVENT HANDLERS
+// --- SOCKET LOGIC ---
 io.on('connection', (socket) => {
-    console.log(`New Connection: ${socket.id}`);
+    console.log(`Socket connected: ${socket.id}`);
 
-    /**
-     * Replacement for ApiClient.getWorldList HTTP call
-     * The client should emit this when opening the world menu
-     */
+    // WORLD LIST via WS
+    // Triggered when client calls ApiClient.getWorldList
     socket.on('getWorldList', () => {
         socket.emit('worldListResponse', { worlds: getWorldsWithPopulation() });
     });
 
-    /**
-     * Joining a world
-     * Fixes 'undefined' userID by checking validity before processing
-     */
+    // JOIN WORLD
     socket.on('joinWorld', (data) => {
         try {
             const { worldId, userID, appearance, x, y } = data;
 
+            // Fix for 'undefined' userID issue
             if (!userID) {
-                console.error(`Rejected Join: UserID is missing from socket ${socket.id}`);
-                socket.emit('error_message', { text: "Login required for multiplayer" });
+                console.warn(`Blocked join from ${socket.id}: No userID provided.`);
                 return;
             }
 
             socket.join(`world_${worldId}`);
 
-            // Save player data including appearance (needed to draw the sprite)
+            // Store full data (Appearance is required for rendering characters)
             players[socket.id] = {
                 socketId: socket.id,
-                userID: userID,
+                userID,
                 world: worldId,
                 x: x || 0,
                 y: y || 0,
                 appearance: appearance || {} 
             };
 
-            // Get existing players in this specific world
-            const othersInWorld = Object.values(players).filter(
-                p => p.world === worldId && p.socketId !== socket.id
-            );
-
-            // Tell the joiner who else is here
-            socket.emit('playerList', othersInWorld);
-
-            // Tell everyone else in this world a new player appeared
-            // Sending the WHOLE object ensures other clients can render the clothes/hair
-            socket.to(`world_${worldId}`).emit('playerJoined', players[socket.id]);
-
-            // Refresh population data for everyone in the lobby
+            // Notify everyone of updated population
             io.emit('worldListUpdate', { worlds: getWorldsWithPopulation() });
 
-            console.log(`Player ${userID} entered world ${worldId}`);
-        } catch (err) {
-            console.error("Socket Join Error:", err);
+            // Send list of neighbors to the joiner
+            const neighbors = Object.values(players).filter(
+                p => p.world === worldId && p.socketId !== socket.id
+            );
+            socket.emit('playerList', neighbors);
+
+            // Broadcast the new player to the world (Including Appearance!)
+            socket.to(`world_${worldId}`).emit('playerJoined', players[socket.id]);
+
+            console.log(`User ${userID} joined world ${worldId}`);
+        } catch (e) {
+            console.error("Join Error:", e);
         }
     });
 
-    /**
-     * Position & Appearance Updates
-     */
+    // POSITION/ANIMATION UPDATES
     socket.on('updatePlayer', (data) => {
         const p = players[socket.id];
         if (p) {
-            Object.assign(p, data); 
-            // Broadcast the update to the specific world room
+            Object.assign(p, data);
             socket.to(`world_${p.world}`).emit('playerUpdate', p);
         }
     });
 
-    /**
-     * Cleanup on Disconnect
-     */
+    // DISCONNECT
     socket.on('disconnect', () => {
         const p = players[socket.id];
         if (p) {
             socket.to(`world_${p.world}`).emit('playerLeft', { userID: p.userID, socketId: socket.id });
             delete players[socket.id];
-            
-            // Update populations in real-time
             io.emit('worldListUpdate', { worlds: getWorldsWithPopulation() });
         }
-        console.log(`Disconnected: ${socket.id}`);
+        console.log(`Socket disconnected: ${socket.id}`);
     });
 });
 
-// 4. RENDER FIX: Root Route Handling
-// If the user visits the root or any subpath, serve index.html
-app.get('*', (req, res) => {
-    res.sendFile(path.join(publicPath, 'index.html'));
-});
-
-// 5. SERVER START
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Server running at http://localhost:${PORT}`);
+    console.log(`Backend listening on port ${PORT}`);
 });
