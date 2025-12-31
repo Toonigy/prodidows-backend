@@ -6,10 +6,10 @@ const cors = require('cors');
 const app = express();
 const server = http.createServer(app);
 
-// Initialize Socket.io with CORS for your frontend URL
+// Enable Socket.io with permissive CORS for Render cross-domain communication
 const io = new Server(server, {
     cors: {
-        origin: "*", // Or your specific frontend URL like "https://your-game.onrender.com"
+        origin: "*",
         methods: ["GET", "POST"]
     }
 });
@@ -17,26 +17,20 @@ const io = new Server(server, {
 app.use(cors());
 app.use(express.json());
 
-// --- BACKEND STATUS ROUTE ---
-// This replaces the res.sendFile logic to prevent ENOENT errors
-app.get('/', (req, res) => {
-    res.json({
-        status: "online",
-        service: "Prodigy Definitive Edition Multiplayer Backend",
-        activePlayers: Object.keys(players).length
-    });
-});
-
-// --- WORLD DATA ---
+// --- WORLD DATA DEFINITION ---
 const worlds = [
     { id: 1, name: "Farflight", maxPopulation: 100, status: "online" },
     { id: 2, name: "Pirate Bay", maxPopulation: 100, status: "online" },
     { id: 3, name: "Crystal Caverns", maxPopulation: 100, status: "online" },
-    { id: 4, name: "Shiverchill", maxPopulation: 100, status: "online" }
+    { id: 4, name: "Shiverchill", maxPopulation: 100, status: "online" },
+    { id: 5, name: "Skywatch", maxPopulation: 100, status: "online" }
 ];
 
 const players = {}; 
 
+/**
+ * Helper: Calculates population and "fullness" for the game's UI
+ */
 function getWorldsWithPopulation() {
     return worlds.map(w => {
         const count = Object.values(players).filter(p => p.world === w.id).length;
@@ -48,67 +42,80 @@ function getWorldsWithPopulation() {
     });
 }
 
-// --- SOCKET LOGIC ---
+// --- HTTP ENDPOINTS (To fix the 404 errors) ---
+
+// This handles the GET request the game makes before/during world selection
+app.all(['/game-api/v1/worlds', '/v1/worlds', '/worlds'], (req, res) => {
+    console.log("HTTP: World list requested");
+    res.json({ worlds: getWorldsWithPopulation() });
+});
+
+// Basic health check
+app.get('/', (req, res) => {
+    res.json({ status: "online", activePlayers: Object.keys(players).length });
+});
+
+// --- SOCKET.IO MULTIPLAYER LOGIC ---
+
 io.on('connection', (socket) => {
     console.log(`Socket connected: ${socket.id}`);
 
-    // WORLD LIST via WS
-    // Triggered when client calls ApiClient.getWorldList
+    // WebSocket replacement for the World List
     socket.on('getWorldList', () => {
         socket.emit('worldListResponse', { worlds: getWorldsWithPopulation() });
     });
 
-    // JOIN WORLD
+    // Handle Player Joining
     socket.on('joinWorld', (data) => {
         try {
             const { worldId, userID, appearance, x, y } = data;
 
-            // Fix for 'undefined' userID issue
+            // RACE CONDITION FIX: If Firebase isn't ready, userID is undefined.
             if (!userID) {
-                console.warn(`Blocked join from ${socket.id}: No userID provided.`);
+                console.warn(`Join blocked: userID undefined for socket ${socket.id}`);
                 return;
             }
 
             socket.join(`world_${worldId}`);
 
-            // Store full data (Appearance is required for rendering characters)
+            // Store full data. 'appearance' is CRITICAL for rendering other players.
             players[socket.id] = {
                 socketId: socket.id,
-                userID,
+                userID: userID,
                 world: worldId,
                 x: x || 0,
                 y: y || 0,
                 appearance: appearance || {} 
             };
 
-            // Notify everyone of updated population
-            io.emit('worldListUpdate', { worlds: getWorldsWithPopulation() });
-
-            // Send list of neighbors to the joiner
+            // 1. Send existing players to the joiner
             const neighbors = Object.values(players).filter(
                 p => p.world === worldId && p.socketId !== socket.id
             );
             socket.emit('playerList', neighbors);
 
-            // Broadcast the new player to the world (Including Appearance!)
+            // 2. Tell neighbors a new player arrived (send WHOLE object)
             socket.to(`world_${worldId}`).emit('playerJoined', players[socket.id]);
 
-            console.log(`User ${userID} joined world ${worldId}`);
+            // 3. Update world populations for everyone
+            io.emit('worldListUpdate', { worlds: getWorldsWithPopulation() });
+
+            console.log(`Player ${userID} joined world ${worldId}`);
         } catch (e) {
             console.error("Join Error:", e);
         }
     });
 
-    // POSITION/ANIMATION UPDATES
+    // Movement/Animation Updates
     socket.on('updatePlayer', (data) => {
         const p = players[socket.id];
-        if (p) {
+        if (p && p.world) {
             Object.assign(p, data);
             socket.to(`world_${p.world}`).emit('playerUpdate', p);
         }
     });
 
-    // DISCONNECT
+    // Disconnect Cleanup
     socket.on('disconnect', () => {
         const p = players[socket.id];
         if (p) {
@@ -122,5 +129,5 @@ io.on('connection', (socket) => {
 
 const PORT = process.env.PORT || 3000;
 server.listen(PORT, () => {
-    console.log(`Backend listening on port ${PORT}`);
+    console.log(`Multiplayer Backend running on port ${PORT}`);
 });
